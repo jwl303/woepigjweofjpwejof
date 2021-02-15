@@ -1,0 +1,138 @@
+---
+title: "Practical Machine Learning - week 4"
+author: "Jae Lee"
+date: "15/02/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+In this report, I will explore data collected from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. The participants were asked to perform barbell lifts in 5 different ways. In this report, I gathered training and test data sets, performed exploratory analysis, manipulated the data sets, and developed a model to predict "classe" variable in the end.
+
+Here, I import libraries and download the raw training and testing data sets.
+```{r cache=TRUE}
+library(glmnet)
+library(Hmisc)
+library(caret)
+library(outliers)
+
+training <- read.csv('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv')
+testing <- read.csv('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv')
+training <- training[,2:dim(training)[2]]
+testing <- testing[,2:dim(testing)[2]]
+```
+
+Upon checking, both data sets have many columns filled with mostly NA. 
+```{r}
+aa<- is.na(training)
+a1 <- as.data.frame(apply(aa, 2, sum))
+colnames(a1) <- c('nancount')
+unique(a1$nancount)
+```
+
+Therefore, these columns filled with NA values are removed from the training and testing data sets. 
+```{r}
+a1$rn <- rownames(a1)
+var2remove <- as.vector(a1[a1$nancount==19216,'rn'])
+df_training <- training[, !colnames(training) %in% var2remove]
+df_testing <- testing[, !colnames(training) %in% var2remove]
+```
+
+Now, the training data set was divided into a training data set as well as a validation data set.
+```{r}
+library(caret)
+set.seed(1234)
+
+inTrain <- createDataPartition(df_training$classe, p=.7, list=FALSE)
+
+df_validation <- df_training[-inTrain, ]
+df_training <- df_training[inTrain, ]
+
+y_train <- df_training$classe
+y_validation <- df_validation$classe
+
+t1 <- df_training[, !sapply(df_training, class) =='character']
+
+df_training   <- df_training[,   colnames(df_training)   %in% colnames(t1)]
+df_validation <- df_validation[, colnames(df_validation) %in% colnames(t1)]
+df_testing    <- df_testing[,    colnames(df_testing)    %in% colnames(t1)]
+```
+Now, I look into the training data set to see how much correlation there is between the predictors.
+```{r}
+df_cor <- cor(df_training)
+diag(df_cor) <- 0
+df_cor <- abs(df_cor)
+which(df_cor > .8, arr.ind=TRUE)
+```
+
+It turns out that many columns are correlated with each other. In order to reduce the dimension, I will perform PCA. But, since PCA 
+is sensitive to outliers, let's check if there are any outliers.
+
+```{r}
+library(outliers)
+yes_outlier <- NULL
+t_colnames <- colnames(df_training)
+for(i in 1:length(t_colnames)){
+    grubb_res <- grubbs.test(df_training[,t_colnames[i]])
+    yes_outlier <- c(yes_outlier, grubb_res$p.value < .05)
+}
+
+c2r <- as.vector(t_colnames[yes_outlier])
+c2r
+```
+The Grubbs.test indicates that there are more than a few columns containing outliers. Since there are already many columns which are highly correlated with others, I've decided to removing those columns with outliers.
+
+```{r}
+df_training   <- df_training[,   colnames(df_training)   %in% c2r]
+df_validation <- df_validation[, colnames(df_validation) %in% c2r]
+df_testing    <- df_testing[,    colnames(df_testing)    %in% c2r]
+```
+
+After removing the columns containing outliers, there are 16 variables remaining. Now I perform PCA to reduce dimensions. I will also create new data sets based on PCA.
+```{r}
+pca_ <- preProcess(df_training, method = 'pca', thresh=.9)
+
+df_pca_training   <- predict(pca_, df_training)
+df_pca_validation <- predict(pca_, df_validation)
+df_pca_testing    <- predict(pca_, df_testing)
+```
+
+Based on the new data sets, I create 3 models using rf, lda, and gbm. These will later be used to construct a stacked model. I also chose k-fold (k=5) cross validation method for building all three models. 
+```{r cache=TRUE}
+fitControl <- trainControl(method = 'cv', number=5)
+
+fit_rf  <- train(x=df_pca_training, y=y_train, method = 'rf',  trControl = fitControl)
+fit_lda <- train(x=df_pca_training, y=y_train, method = 'lda', trControl = fitControl)
+fit_gbm <- train(x=df_pca_training, y=y_train, method = 'gbm', trControl = fitControl, verbose=FALSE)
+```
+Now let's see how they perform against the validation data set.
+```{r}
+pred_rf <- predict(fit_rf, df_pca_validation)
+pred_lda <- predict(fit_lda, df_pca_validation)
+pred_gbm <- predict(fit_gbm, df_pca_validation)
+
+confusionMatrix(factor(y_validation), pred_rf)  # 84%
+confusionMatrix(factor(y_validation), pred_lda) # 38%
+confusionMatrix(factor(y_validation), pred_gbm) # 65%
+```
+
+Now let's compare the best sole performing model (rf-based) against a stacked model of all three above. The result was that the performance of the rf-based model was essentially idential to that of the stacked model of all three previous models. Therefore, I will just use the rf model to predict the "classe" variable on the testing data set.
+```{r}
+vali_rf  <- predict(fit_rf, df_pca_validation)
+vali_lda <- predict(fit_lda, df_pca_validation)
+vali_gbm <- predict(fit_gbm, df_pca_validation)
+
+stacked_df <- data.frame(vali_rf, vali_lda, vali_gbm, y = y_validation)
+fit <- train(y~., method = 'rf', data=stacked_df, trControl = fitControl)
+
+confusionMatrix(factor(y_validation), predict(fit, df_pca_validation))
+```
+
+According to the confusion matrix of the rf model above, the expected out of sample error based on the rf model should be ~ 0.15. Finally, the prediction for the testing data set is below.
+```{r}
+pred_test <- predict(fit_rf, df_pca_testing)
+pred_test
+```
+
+
